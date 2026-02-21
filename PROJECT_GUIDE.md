@@ -1,62 +1,91 @@
-# 🎓 Understanding the Credit Approval System
+# 🎓 Credit Approval System - Professional Engineering Guide
 
-Welcome! This guide is designed to help you understand how this project works under the hood. It’s perfect for learning the architecture and logic used in professional backend engineering.
+This guide describes the architecture, logic, and operational procedures of the Credit Approval System. It is designed to demonstrate professional backend engineering practices, including distributed tasks, relational modeling, and automated data processing.
 
 ---
 
 ## 🏗 1. System Architecture
+The project is built on a **Distributed Multi-Service Architecture** orchestrated via Docker.
 
-The project follows a **Distributed Architecture**. Here’s why we use these specific components:
-
-### **A. Django (The Web Server)**
-Django handles the "Request-Response" cycle. When a user calls an API like `/register`, Django processes the input, speaks to the database, and sends back a JSON response.
-
-### **B. PostgreSQL (The Brain)**
-We use a relational database because customer and loan data are highly structured. One customer can have multiple loans (**One-to-Many relationship**).
-
-### **C. Celery & Redis (The Workers)**
-When you import 10,000 rows from an Excel file, it takes time. If we do this in the main web server, the app will "freeze" for other users.
-- **Celery** is a "worker" that runs tasks in the background.
-- **Redis** is the "mailbox" where the web server drops tasks for Celery to pick up later.
+### **Components:**
+*   **Django (Web Server):** Handles the RESTful API and core business logic.
+*   **PostgreSQL (Database):** A relational database storing structured Customer and Loan records with high integrity.
+*   **Celery (Worker):** Handles heavy lifting, such as Excel data ingestion, without blocking the main web server.
+*   **Redis (Message Broker):** Acts as the communication bridge between Django and the Celery workers.
+*   **Docker:** Ensures the environment is identical across all machines (Database, Redis, and App).
 
 ---
 
-## 🧠 2. The Credit Scoring Logic (The Algorithm)
+## 🧠 2. The Credit Scoring Algorithm (The Heart of the System)
+The credit score (0-100) determines whether a loan is approved and at what interest rate.
 
-The most important part of this project is how we decide if a loan is approved. Here is the exact logic I implemented for you:
+### **The Weighting (50/25/25 Rule):**
+1.  **Punctuality (50%):** Calculated as the ratio of `EMIs paid on time` vs `Total EMIs` across all historical loans.
+2.  **Experience (25%):** Rewards users for having taken multiple loans. (5 points per loan, capped at 25).
+3.  **Active Activity (25%):** Penalizes users who have taken too many loans in the current calendar year. (Starts at 25 points, decreases for every new loan).
 
-### **How the Score (0-100) is Calculated:**
-1. **Punctuality (50% weight):** We check what percentage of EMIs were paid on time across all previous loans.
-2. **Experience (25% weight):** We count how many loans the user has taken in total.
-3. **Current Activity (25% weight):** We check if they have taken too many loans in the current calendar year.
-
-### **The Safety "Kill Switch":**
-If a customer’s total debt (sum of all current loans) already exceeds their `Approved Limit`, their score is **automatically set to 0**.
-
-### **Approval Tiers:**
-- **Score > 50:** Instant approval.
-- **Score 30-50:** Approved, but we increase the interest rate to at least **12%**.
-- **Score 10-30:** Approved, but we increase the interest rate to at least **16%**.
-- **Score < 10:** Automatic Rejection.
+### **The Safety Kill-Switches:**
+*   **Debt-to-Limit Ratio:** If a customer's total **Current Debt** (active loans) exceeds their `Approved Limit`, their score is automatically set to **0**.
+*   **Income Burden:** If the total monthly EMIs (existing + new) exceed **50% of the customer's monthly income**, the loan is automatically rejected, regardless of the score.
 
 ---
 
-## 📊 3. The Local Procedure (The Workflow)
+## 🛠 3. Setup & Operations
 
-To get this running on your PC, you are essentially creating a virtual mini-network using Docker.
+### **Step 1: Start the Environment**
+```bash
+docker-compose up -d --build
+```
 
-1. **Building Docker Image:** Docker reads the `Dockerfile` to install Python, Linux packages, and our `requirements.txt`.
-2. **Migrations:** Django "migrates" the Python models (`Customer`, `Loan`) into actual tables in the PostgreSQL database.
-3. **Ingestion Command:** We wrote a custom command `ingest_data` that reads the Excel files using `pandas`, cleans the data, and saves it into the Database.
+### **Step 2: Database Setup**
+Apply migrations to create the tables in PostgreSQL:
+```bash
+docker-compose exec web python manage.py makemigrations api
+docker-compose exec web python manage.py migrate
+```
+
+### **Step 3: Data Ingestion**
+Import the `customer_data.xlsx` and `loan_data.xlsx` into the database:
+```bash
+docker-compose exec web python manage.py ingest_data
+```
+
+### **Step 4: Create Admin Access**
+To view data via the web interface:
+```bash
+docker-compose exec web python manage.py shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('admin', 'admin@example.com', 'admin123')"
+```
+*   **Admin Login:** `http://localhost:8000/admin/` (User: `admin`, Pass: `admin123`)
 
 ---
 
-## 🛠 4. Key Files to Study
-1. `api/models.py`: Defines the database structure.
-2. `api/views.py`: Contains the scoring logic and API responses.
-3. `api/tasks.py`: Contains the code for reading Excel in the background.
-4. `docker-compose.yml`: Tells Docker how to link the DB, Redis, and Web server together.
+## 📊 4. API Endpoints
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/` | GET | Index showing all available endpoints. |
+| `/api/register/` | POST | Registers a customer and calculates their limit. |
+| `/api/check-eligibility/`| POST | Checks if a loan is approved and returns interest rate. |
+| `/api/create-loan/` | POST | Finalizes and saves an approved loan. |
+| `/api/view-loan/<id>/` | GET | Fetches full details of a specific loan. |
+| `/api/view-loans/<id>/`| GET | Lists all historical and active loans for a customer. |
 
 ---
 
-**Tip:** Try changing the `monthly_income` in a `/register` request and see how it automatically changes the `approved_limit`!
+## 🧪 5. Testing & Validation
+We use Django's testing suite to verify the logic. To run the automated tests:
+```bash
+docker-compose exec web python manage.py test api
+```
+
+---
+
+## � Key Files to Study
+1.  `api/models.py`: Defines the database schema (ForeignKeys, AutoFields).
+2.  `api/views.py`: Contains the complex math for Credit Scoring and Eligibility.
+3.  `api/tasks.py`: Demonstrates background processing with Pandas.
+4.  `api/admin.py`: Configures the advanced search and filter views in the Admin panel.
+5.  `docker-compose.yml`: Defines the infrastructure (DB, Redis, Worker).
+
+---
+**Note:** This system follows the strict requirements of the Backend Assignment while adding industrial-grade safety checks and documentation.

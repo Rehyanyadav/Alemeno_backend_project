@@ -33,36 +33,43 @@ def register(request):
     }, status=status.HTTP_201_CREATED)
 
 def calculate_credit_score(customer):
-    loans = Loan.objects.filter(customer=customer)
-    if not loans.exists():
+    all_loans = Loan.objects.filter(customer=customer)
+    if not all_loans.exists():
         return 100
     
-    total_loans = loans.count()
-    total_tenure = sum(l.tenure for l in loans)
-    paid_on_time_ratio = sum(l.emis_paid_on_time for l in loans) / (total_tenure if total_tenure > 0 else 1)
+    # 1. Punctuality (50% weight)
+    total_emis = sum(l.tenure for l in all_loans)
+    if total_emis > 0:
+        paid_on_time_ratio = sum(l.emis_paid_on_time for l in all_loans) / total_emis
+    else:
+        paid_on_time_ratio = 1.0
     
-    current_year_loans = loans.filter(start_date__year=date.today().year).count()
-    total_loan_volume = sum(l.loan_amount for l in loans)
+    # 2. Experience (25% weight)
+    # Scoring 5 points per loan, max 25
+    experience_score = min(all_loans.count(), 5) * 5
     
-    score = (paid_on_time_ratio * 50) + (min(total_loans, 5) * 5) + (max(0, 10 - current_year_loans) * 2)
+    # 3. Current Activity (25% weight)
+    # Check loans tagken in the current year
+    current_year_loans = all_loans.filter(start_date__year=date.today().year).count()
+    # 25 points if 0-1 loans, decreasing by 5 for each additional loan
+    activity_score = max(0, 25 - (current_year_loans * 5))
     
-    if total_loan_volume > customer.approved_limit:
+    score = (paid_on_time_ratio * 50) + experience_score + activity_score
+    
+    # Safety Kill Switch: Current Debt > Approved Limit
+    active_loans = all_loans.filter(end_date__gte=date.today())
+    current_debt = sum(l.loan_amount for l in active_loans)
+    
+    if current_debt > customer.approved_limit:
         return 0
     
     return min(100, score)
 
-@api_view(['POST'])
-def check_eligibility(request):
-    data = request.data
-    customer_id = data.get('customer_id')
-    requested_loan_amount = data.get('loan_amount')
-    interest_rate = data.get('interest_rate')
-    tenure = data.get('tenure')
-    
+def get_eligibility(customer_id, requested_loan_amount, interest_rate, tenure):
     try:
         customer = Customer.objects.get(customer_id=customer_id)
     except Customer.DoesNotExist:
-        return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+        return None
     
     credit_score = calculate_credit_score(customer)
     
@@ -80,9 +87,11 @@ def check_eligibility(request):
     else:
         approval = False
         
-    total_current_emis = sum(l.monthly_repayment for l in Loan.objects.filter(customer=customer))
-    monthly_rate = corrected_interest_rate / (12 * 100)
+    # Check if sum of all current EMIs > 50% of monthly income
+    active_loans = Loan.objects.filter(customer=customer, end_date__gte=date.today())
+    total_current_emis = sum(l.monthly_repayment for l in active_loans)
     
+    monthly_rate = corrected_interest_rate / (12 * 100)
     if monthly_rate > 0:
         new_emi = (requested_loan_amount * monthly_rate * (1 + monthly_rate)**tenure) / ((1 + monthly_rate)**tenure - 1)
     else:
@@ -91,24 +100,48 @@ def check_eligibility(request):
     if total_current_emis + new_emi > (0.5 * customer.monthly_income):
         approval = False
 
-    return Response({
+    return {
         "customer_id": customer_id,
         "approval": approval,
         "interest_rate": interest_rate,
         "corrected_interest_rate": corrected_interest_rate,
         "tenure": tenure,
-        "monthly_installment": round(new_emi, 2)
-    })
+        "monthly_installment": round(new_emi, 2),
+        "credit_score": round(credit_score, 1)
+    }
+
+@api_view(['POST'])
+def check_eligibility(request):
+    data = request.data
+    res = get_eligibility(
+        data.get('customer_id'),
+        data.get('loan_amount'),
+        data.get('interest_rate'),
+        data.get('tenure')
+    )
+    if res is None:
+        return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+    return Response(res)
 
 @api_view(['POST'])
 def create_loan(request):
-    resp = check_eligibility(request).data
+    data = request.data
+    resp = get_eligibility(
+        data.get('customer_id'),
+        data.get('loan_amount'),
+        data.get('interest_rate'),
+        data.get('tenure')
+    )
+    
+    if resp is None:
+        return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+
     if resp.get('approval'):
         customer = Customer.objects.get(customer_id=resp['customer_id'])
         loan = Loan.objects.create(
             customer=customer,
-            loan_amount=request.data['loan_amount'],
-            tenure=request.data['tenure'],
+            loan_amount=data['loan_amount'],
+            tenure=data['tenure'],
             interest_rate=resp['corrected_interest_rate'],
             monthly_repayment=resp['monthly_installment'],
             start_date=date.today(),
@@ -125,7 +158,7 @@ def create_loan(request):
     else:
         return Response({
             "loan_id": None,
-            "customer_id": request.data['customer_id'],
+            "customer_id": data['customer_id'],
             "loan_approved": False,
             "message": "Loan not approved based on credit score or income",
             "monthly_installment": 0

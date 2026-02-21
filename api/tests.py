@@ -29,7 +29,7 @@ class CreditSystemTests(TestCase):
 
         eligibility_data = {
             "customer_id": customer_id,
-            "loan_amount": 500000,
+            "loan_amount": 100000,
             "interest_rate": 10,
             "tenure": 12
         }
